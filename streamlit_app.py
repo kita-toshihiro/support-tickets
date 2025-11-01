@@ -8,14 +8,13 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="授業アンケート解析（対話式）", page_icon="📊")
-st.title("📊 授業アンケート解析ツール（チャット式）")
+st.set_page_config(page_title="授業アンケート解析（対話式 + Gemini）", page_icon="📊")
+st.title("📊 授業アンケート解析ツール（チャット + Gemini対応）")
 st.write(
     """
-    CSVをアップロードして解析できます。さらに「チャット形式」で
-    データの内容について質問できます（例: カラム一覧、特定キーワードの検索、統計要約など）。
-    期待されるCSVのカラム（ヘッダ）は次のとおりです:
-    番号,学生番号,アンケート回答,授業が役立ったか（５段階評価）,授業が難しかったか（５段階評価）,回答日時
+    CSVをアップロードして解析できます。サイドバーのチャットでデータに関する質問が可能です。
+    オプションで Google Gemini（Vertex AI / Vertex SDK）を使った自然言語応答を有効にできます。
+    （Gemini を使う場合は Google Cloud の設定／認証が必要です — 下の説明を参照してください）
     """
 )
 
@@ -166,10 +165,35 @@ if "授業が難しかったか（５段階評価）" in df.columns:
     df["授業が難しかったか（５段階評価）"] = pd.to_numeric(df["授業が難しかったか（５段階評価）"], errors="coerce")
 
 # -------------------------
+# Gemini (Vertex AI) 設定（サイドバー）
+# -------------------------
+st.sidebar.header("LLM（Gemini）設定（オプション）")
+use_gemini = st.sidebar.checkbox("Gemini を使った自然言語応答を有効にする", value=False)
+st.sidebar.markdown(
+    "Gemini を使う場合は、Vertex AI SDK（または google-cloud-aiplatform）を設定してください。\n"
+    "このアプリはまずローカルにインストールされた Vertex SDK を試行し、見つからない場合は外部呼び出しの方法を案内します。"
+)
+
+# モデル選択（ローカル SDK を使う場合のモデル名のヒント）
+gemini_model_hint = st.sidebar.selectbox(
+    "モデル（SDK/REST の環境に合わせて選択）",
+    options=["gpt-4o-mini", "gemini-proto", "chat-bison@001", "text-bison@001"],
+    index=2,
+)
+
+# Credential / project info（必要なら）
+project = st.sidebar.text_input("GCP プロジェクト（必要な場合）", value="")
+location = st.sidebar.text_input("リージョン（例: us-central1）", value="us-central1")
+
+st.sidebar.markdown(
+    "注意: Vertex SDK（vertexai / google-cloud-aiplatform）を使う場合はサービスアカウントで認証（環境変数 GOOGLE_APPLICATION_CREDENTIALS 等）が必要です。"
+)
+
+# -------------------------
 # チャットUI: 一連の対話で質問できる仕組み
 # -------------------------
 st.sidebar.header("チャット式インターフェース")
-st.sidebar.write("ここに質問を入力すると、データフレームに基づいて応答します。")
+st.sidebar.write("ここに質問を入力すると、データフレームに基づいて応答します。Gemini が有効なら LLM を呼び出して自然言語で回答します。")
 
 # 会話履歴をセッションステートで保持
 if "chat_history" not in st.session_state:
@@ -196,27 +220,86 @@ cols_for_search = string_cols if string_cols else list(df.columns)
 search_column = st.sidebar.selectbox("検索対象列", options=cols_for_search, index=0 if cols_for_search else None)
 st.sidebar.caption("チャットでキーワード検索をしたい場合、ここで列を選んでから質問してください。")
 
-# 処理関数: ユーザーの自由なテキストに対して簡易ルールで応答を生成
-def answer_query(query: str, df: pd.DataFrame) -> str:
-    q = query.strip().lower()
+# -------------------------
+# Gemini 呼び出しラッパー（可能なら SDK を使う）
+# -------------------------
+def call_gemini_via_vertex_sdk(prompt: str, model: str = None, max_tokens: int = 512) -> str:
+    """
+    ローカルに Vertex AI の SDK（vertexai / google-cloud-aiplatform）が入っている場合に実行するラッパー。
+    - vertexai.preview.language_models.TextGenerationModel を使う（環境により import 名が変わるため試行します）。
+    - ここで例外が出た場合は呼び出しに失敗した旨を文字列で返します。
+    """
+    try:
+        # 新しい vertex-ai SDK（pip install google-cloud-aiplatform か vertexai）
+        # Try vertexai (recommended modern SDK)
+        try:
+            import vertexai
+            from vertexai.preview.language_models import TextGenerationModel
+
+            # 初期化は project/location が必要な場合に行う
+            if project:
+                vertexai.init(project=project, location=location)
+            model_name = model or gemini_model_hint or "chat-bison@001"
+            tg = TextGenerationModel.from_pretrained(model_name)
+            # シンプルな text generation（チャット風にプロンプトをそのまま渡す）
+            response = tg.predict(prompt, max_output_tokens=max_tokens)
+            return response.text if hasattr(response, "text") else str(response)
+        except Exception:
+            # Fallback to google-cloud-aiplatform client (older SDK)
+            from google.cloud import aiplatform
+
+            if project:
+                aiplatform.init(project=project, location=location)
+            model_name = model or gemini_model_hint or "chat-bison@001"
+            model = aiplatform.TextGenerationModel.from_pretrained(model_name)
+            response = model.predict(prompt, max_output_tokens=max_tokens)
+            # response が dict のときなどに備える
+            if hasattr(response, "text"):
+                return response.text
+            return str(response)
+    except Exception as e:
+        return f"[Gemini 呼び出しに失敗しました: {e}]"
+
+def call_gemini(prompt: str) -> str:
+    """
+    統一インターフェース。Gemini を呼べない場合はエラーメッセージを返す。
+    """
+    if not use_gemini:
+        return "[Gemini 未有効] Gemini を有効にするにはサイドバーのチェックボックスをオンにしてください。"
+    # Try SDK-based call
+    resp = call_gemini_via_vertex_sdk(prompt, model=gemini_model_hint)
+    return resp
+
+# -------------------------
+# チャット応答ロジック（ルールベース + Gemini を組み合わせる）
+# -------------------------
+def answer_query(query: str, df: pd.DataFrame, use_llm: bool = False) -> str:
+    """
+    query に対してまずシンプルなルールベース応答を作る。
+    - ルールで応答が得られない、または LLM を明示的に使う指定がある場合は
+      Gemini にプロンプトを送り、DataFrame の簡易コンテキストを含めて応答を得る。
+    """
+    q = query.strip()
     if q == "":
         return "質問が入力されていません。何か質問してください（例: カラム一覧、サンプル行、アンケートに含まれる特定語の検索など）。"
 
+    q_lower = q.lower()
+
     # カラム一覧
-    if "カラム" in q or "列" in q or "columns" in q:
+    if "カラム" in q_lower or "列" in q_lower or "columns" in q_lower:
         return "カラム一覧: " + ", ".join([str(c) for c in df.columns.tolist()])
 
     # サンプル行
-    if "サンプル" in q or "先頭" in q or "head" in q:
+    if "サンプル" in q_lower or "先頭" in q_lower or "head" in q_lower:
         n = 5
-        m = re.search(r"(\d+)", q)
+        m = re.search(r"(\d+)", q_lower)
         if m:
             n = int(m.group(1))
         preview = df.head(n)
         return f"先頭 {n} 行のプレビュー:\n\n{preview.to_string(index=False)}"
 
-    # 特定カラムの平均値（単純マッチ）
-    if "平均" in q and ("役立" in q or "役に" in q or "useful" in q):
+    # 特定カラムの平均値
+    if "平均" in q_lower and ("役立" in q_lower or "役に" in q_lower or "useful" in q_lower):
         col = "授業が役立ったか（５段階評価）"
         if col in df.columns:
             avg = df[col].mean(skipna=True)
@@ -224,16 +307,8 @@ def answer_query(query: str, df: pd.DataFrame) -> str:
         else:
             return f"列 '{col}' が見つかりません。カラム一覧を確認してください。"
 
-    if "平均" in q and ("難し" in q or "難しい" in q or "difficult" in q):
-        col = "授業が難しかったか（５段階評価）"
-        if col in df.columns:
-            avg = df[col].mean(skipna=True)
-            return f"'{col}' の平均: {avg:.2f}" if not np.isnan(avg) else f"'{col}' に数値データがありません。"
-        else:
-            return f"列 '{col}' が見つかりません。カラム一覧を確認してください。"
-
     # キーワード検索の自然文パターン（例: 'アンケート回答に 演習 を含む行'）
-    m = re.search(r"(含む|含める|含まれる).{0,10}['\"“”]?([^'\"、\s]+)['\"”]?", query)
+    m = re.search(r"(含む|含める|含まれる).{0,10}['\"“”]?([^'\"、\s]+)['\"”]?", q)
     if m:
         keyword = m.group(2)
         col = search_column if search_column else "アンケート回答"
@@ -244,35 +319,37 @@ def answer_query(query: str, df: pd.DataFrame) -> str:
         if len(matched) == 0:
             return f"キーワード「{keyword}」に一致する行は見つかりませんでした（列: {col}）。"
         else:
-            # 表示は最大20行まで
             return f"キーワード「{keyword}」に一致する {len(matched)} 件の行（最大20件表示）:\n\n{matched.head(20).to_string(index=False)}"
 
-    # 単純なキーワードが入っている場合（"演習" など）
-    m2 = re.search(r"['\"“”]?([^'\"、\s]{2,})['\"”]?$", query)
-    if m2 and len(query.split()) == 1:
-        keyword = m2.group(1)
-        col = search_column if search_column else "アンケート回答"
-        if col in df.columns:
-            mask = df[col].astype(str).str.contains(keyword, case=False, na=False)
-            matched = df[mask]
-            return f"キーワード「{keyword}」に一致する行: {len(matched)} 件（列: {col}）。先頭5件:\n\n{matched.head(5).to_string(index=False)}" if len(matched) > 0 else f"キーワード「{keyword}」に一致する行は見つかりませんでした。"
-    # 評価分布や基本統計の要求
-    if "分布" in q or "ヒストグラム" in q:
-        parts = []
+    # ルールベースで対応できない、または LLM 指定がある場合は LLM に委ねる
+    if use_llm or ("要約" in q_lower or "まとめて" in q_lower or "説明して" in q_lower or "解説" in q_lower):
+        # Prepare compact context: カラム一覧 + 上位10行のテキスト（アンケート回答）
+        context_lines = []
+        context_lines.append("カラム一覧: " + ", ".join([str(c) for c in df.columns.tolist()]))
+        if "アンケート回答" in df.columns:
+            # include up to first 10 free-text answers for context
+            text_sample = df["アンケート回答"].dropna().astype(str).head(10).tolist()
+            context_lines.append("アンケート回答のサンプル:")
+            for i, t in enumerate(text_sample, 1):
+                context_lines.append(f"{i}. {t}")
+        # also include basic stats
+        stats = []
         if "授業が役立ったか（５段階評価）" in df.columns:
-            vc = df["授業が役立ったか（５段階評価）"].value_counts().sort_index()
-            parts.append("役立ったか（評価）:\n" + vc.to_string())
+            stats.append(f"役立ったか（平均）: {df['授業が役立ったか（５段階評価）'].mean(skipna=True):.2f}")
         if "授業が難しかったか（５段階評価）" in df.columns:
-            vc2 = df["授業が難しかったか（５段階評価）"].value_counts().sort_index()
-            parts.append("難しかったか（評価）:\n" + vc2.to_string())
-        return "\n\n".join(parts) if parts else "該当する評価列が見つかりません。"
+            stats.append(f"難しかったか（平均）: {df['授業が難しかったか（５段階評価）'].mean(skipna=True):.2f}")
+        context_lines.append(" ; ".join(stats))
+        system_prompt = (
+            "あなたは授業アンケートデータ解析アシスタントです。以下のコンテキストを参照し、ユーザーの質問に日本語でわかりやすく答えてください。"
+        )
+        full_prompt = system_prompt + "\n\nコンテキスト:\n" + "\n".join(context_lines) + "\n\nユーザーの質問: " + q
+        # Call Gemini
+        gemini_resp = call_gemini(full_prompt)
+        return gemini_resp
 
-    # それ以外は自由テキスト検索（任意の列を横断）
-    # query に含まれる語を dataframe 全体で探す（最大100行表示）
-    tokens = re.findall(r"\w+|[^\s]", query)
-    keyword = query.strip()
+    # それ以外は簡易テキスト横断検索
+    keyword = q.strip()
     if len(keyword) >= 1:
-        # 全テキスト列を使って検索
         text_cols = list(df.select_dtypes(include=["object", "string"]).columns)
         if not text_cols:
             return "テキスト列が見つかりません。具体的にどの列を検索したいか指定してください。"
@@ -282,7 +359,7 @@ def answer_query(query: str, df: pd.DataFrame) -> str:
         matched = df[mask]
         if len(matched) == 0:
             return f"「{keyword}」に一致する行は見つかりませんでした（テキスト列を横断検索）。"
-        return f"テキスト列横断検索で {len(matched)} 件ヒット（最大100行表示）:\n\n{matched.head(100).to_string(index=False)}"
+        return f"テキスト列横断検索で {len(matched)} 件ヒット（最大20行表示）:\n\n{matched.head(20).to_string(index=False)}"
 
     return "すみません、その質問には対応していません。'カラム一覧' や 'サンプル行'、'アンケート回答に 演習 を含む行' などの例を試してください。"
 
@@ -290,7 +367,8 @@ def answer_query(query: str, df: pd.DataFrame) -> str:
 if user_input:
     user_question = user_input.strip()
     st.session_state.chat_history.append(("user", user_question))
-    response = answer_query(user_question, df)
+    # Gemini を使うかは use_gemini またはクエリ文内の指定で決める（ここはシンプルに use_gemini フラグのみ）
+    response = answer_query(user_question, df, use_llm=use_gemini)
     st.session_state.chat_history.append(("bot", response))
 
 # チャット履歴表示
@@ -299,16 +377,13 @@ for role, text in st.session_state.chat_history[::-1]:
     if role == "user":
         st.markdown(f"**あなた:** {text}")
     else:
+        # bot の返答が複数行の場合はコードブロックで表示
         st.markdown(f"**ツール:**\n```\n{text}\n```")
 
 # -------------------------
-# 既存の解析機能（表示中データに基づくグラフ等）
+# 解析パネル（既存機能）
 # -------------------------
 st.header("解析パネル（表示中データに基づく）")
-
-# 現在のフィルタ（チャットで検索して matched を生成しているなら df_filtered を使う）
-# チャットルールにマッチして last response に matched DataFrame を返す場合、現在は text 出力のみなので
-# ここではフィルタ無しの全体表示を行う。必要ならチャット側で df_filtered をセッションに入れる拡張が可能。
 df_filtered = df.copy()
 
 col1, col2, col3 = st.columns(3)
@@ -361,4 +436,7 @@ if "授業が難しかったか（５段階評価）" in df_filtered.columns:
     )
     st.altair_chart(chart2, use_container_width=True)
 
-st.caption("注: チャットはルールベースの簡易応答です。より自然な対話や要約を望む場合は外部の NLP モデル（API）を組み合わせてください。")
+st.caption(
+    "注: Gemini 呼び出しを行うには Vertex AI 関連のライブラリ（vertexai など）を環境にインストールし、"
+    "適切な認証（GOOGLE_APPLICATION_CREDENTIALS の設定など）を行ってください。"
+)
