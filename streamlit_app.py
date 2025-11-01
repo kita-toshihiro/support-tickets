@@ -73,6 +73,30 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
             col_map[c] = "回答日時"
     return df.rename(columns=col_map)
 
+def make_columns_unique(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    列名の重複を避けるために、一意化する。
+    重複があれば '列名(1)', '列名(2)' ... のように変更する。
+    """
+    cols = list(df.columns)
+    seen = {}
+    new_cols = []
+    for c in cols:
+        if c not in seen:
+            seen[c] = 1
+            new_cols.append(c)
+        else:
+            seen[c] += 1
+            new_name = f"{c}({seen[c]-1})"
+            # もし new_name が既に存在していたら更にインクリメント
+            while new_name in seen:
+                seen[c] += 1
+                new_name = f"{c}({seen[c]-1})"
+            seen[new_name] = 1
+            new_cols.append(new_name)
+    df.columns = new_cols
+    return df
+
 def safe_to_numeric(s):
     try:
         return pd.to_numeric(s)
@@ -104,17 +128,14 @@ def make_safe_preview(df: pd.DataFrame, n=50) -> pd.DataFrame:
 
     # datetime.date を pandas datetime に変換（列全体が date 型なら変換）
     for col in df_preview.columns:
-        # convert python datetime.date in cells to pandas datetime if possible
         if df_preview[col].dropna().apply(lambda x: isinstance(x, datetime.date) and not isinstance(x, datetime.datetime)).any():
             try:
                 df_preview[col] = pd.to_datetime(df_preview[col])
             except Exception:
-                # 変換できなければ文字列化
                 df_preview[col] = df_preview[col].astype(str)
 
     # 非スカラー要素を文字列化
     for col in df_preview.columns:
-        # pandas.Series.map で isinstance を個別にチェック（NaN は無視）
         try:
             has_bad = df_preview[col].dropna().apply(lambda x: isinstance(x, (list, dict, set, tuple))).any()
         except Exception:
@@ -122,9 +143,8 @@ def make_safe_preview(df: pd.DataFrame, n=50) -> pd.DataFrame:
         if has_bad:
             df_preview[col] = df_preview[col].astype(str)
 
-    # それでも object 型で pyarrow が嫌う可能性が高い場合は文字列化しておく（安全策）
+    # object 列は文字列化しておく（安全策）
     for col in df_preview.select_dtypes(include=["object"]).columns:
-        # 文字列長が非常に長い場合や混在型かを判断して文字列化（ここでは安全のため文字列化して問題なし）
         try:
             df_preview[col] = df_preview[col].astype(str)
         except Exception:
@@ -146,6 +166,9 @@ else:
 
 # 正規化（カラム名を期待する日本語名に）
 df = normalize_columns(df)
+
+# 重複列名を検出して一意化する（これが今回の重要な修正）
+df = make_columns_unique(df)
 
 # 必要なカラムがなければ警告
 required_cols = [
@@ -170,7 +193,14 @@ try:
 except Exception as e:
     # pyarrow 変換などでエラーが返る場合に備え、文字列化したものを表示して落ちないようにする
     st.warning(f"テーブル表示でエラーが発生しました（安全化した上でも表示に失敗しました）。詳細: {e}")
-    st.write(df_preview.astype(str))
+    # ここでは index をクリアし、列名衝突が残らないように列名を str で再設定して表示
+    fallback = df_preview.copy()
+    fallback.columns = [str(c) for c in fallback.columns]
+    try:
+        st.write(fallback.astype(str))
+    except Exception as e2:
+        st.error(f"安全表示にも失敗しました: {e2}")
+        st.write("列名一覧（参考）:", list(df.columns))
 
 # 型変換
 if "回答日時" in df.columns:
@@ -209,7 +239,6 @@ else:
 st.write("")
 st.subheader("評価の分布")
 
-charts = []
 if "授業が役立ったか（５段階評価）" in df.columns:
     useful_df = df.dropna(subset=["授業が役立ったか（５段階評価）"])
     useful_counts = useful_df["授業が役立ったか（５段階評価）"].value_counts().reset_index()
