@@ -186,12 +186,36 @@ if missing:
 # 表示用に先頭を出す
 st.header("データプレビュー")
 
+# --- キーワード検索 UI（追加） ---
+st.subheader("フィルタ: キーワードで行を絞り込み")
+# 検索対象列の選択肢（文字列列を優先）
+string_cols = list(df.select_dtypes(include=["object", "string"]).columns)
+# 候補が空なら全列を対象にする
+cols_for_search = string_cols if string_cols else list(df.columns)
+search_column = st.selectbox("検索対象列を選択（部分一致、大文字小文字を区別しません）", options=cols_for_search, index=0 if cols_for_search else None)
+keyword = st.text_input("検索キーワード（空欄でフィルタ解除）", value="")
+
 # --- 安全化してから表示する ---
 df_preview = make_safe_preview(df, n=50)
+
+# キーワードが指定されたらフィルタを適用
+if keyword and search_column:
+    # 部分一致（case-insensitive）。NaN は False 扱い。
+    try:
+        mask = df[search_column].astype(str).str.contains(keyword, case=False, na=False)
+        df_filtered = df[mask].copy()
+        st.info(f"キーワード「{keyword}」に一致する行: {len(df_filtered)} 件（検索列: {search_column}）")
+        df_preview = make_safe_preview(df_filtered, n=50)
+    except Exception as e:
+        st.warning(f"フィルタ適用中にエラーが発生しました: {e}")
+        df_filtered = df.copy()
+else:
+    df_filtered = df.copy()
+
+# 表示（安全化済み）
 try:
     st.dataframe(df_preview, use_container_width=True)
 except Exception as e:
-    # pyarrow 変換などでエラーが返る場合に備え、文字列化したものを表示して落ちないようにする
     st.warning(f"テーブル表示でエラーが発生しました（安全化した上でも表示に失敗しました）。詳細: {e}")
     # ここでは index をクリアし、列名衝突が残らないように列名を str で再設定して表示
     fallback = df_preview.copy()
@@ -216,31 +240,31 @@ if "授業が役立ったか（５段階評価）" in df.columns:
 if "授業が難しかったか（５段階評価）" in df.columns:
     df["授業が難しかったか（５段階評価）"] = pd.to_numeric(df["授業が難しかったか（５段階評価）"], errors="coerce")
 
-# 基本統計
+# 基本統計（フィルタ前の全体に対する集計）
 st.header("集計・基本統計")
 col1, col2, col3 = st.columns(3)
 
 total_responses = len(df)
-col1.metric("回答数", total_responses)
+col1.metric("回答数（全体）", total_responses)
 
 if "授業が役立ったか（５段階評価）" in df.columns:
     avg_useful = df["授業が役立ったか（５段階評価）"].mean(skipna=True)
-    col2.metric("授業が役立ったか（平均）", f"{avg_useful:.2f}" if not np.isnan(avg_useful) else "N/A")
+    col2.metric("授業が役立ったか（平均・全体）", f"{avg_useful:.2f}" if not np.isnan(avg_useful) else "N/A")
 else:
-    col2.metric("授業が役立ったか（平均）", "N/A")
+    col2.metric("授業が役立ったか（平均・全体）", "N/A")
 
 if "授業が難しかったか（５段階評価）" in df.columns:
     avg_difficulty = df["授業が難しかったか（５段階評価）"].mean(skipna=True)
-    col3.metric("授業が難しかったか（平均）", f"{avg_difficulty:.2f}" if not np.isnan(avg_difficulty) else "N/A")
+    col3.metric("授業が難しかったか（平均・全体）", f"{avg_difficulty:.2f}" if not np.isnan(avg_difficulty) else "N/A")
 else:
-    col3.metric("授業が難しかったか（平均）", "N/A")
+    col3.metric("授業が難しかったか（平均・全体）", "N/A")
 
-# 評価分布のチャート
+# 評価分布のチャート（フィルタ後のデータを使って表示）
 st.write("")
-st.subheader("評価の分布")
+st.subheader("評価の分布（表示中のデータに基づく）")
 
-if "授業が役立ったか（５段階評価）" in df.columns:
-    useful_df = df.dropna(subset=["授業が役立ったか（５段階評価）"])
+if "授業が役立ったか（５段階評価）" in df_filtered.columns:
+    useful_df = df_filtered.dropna(subset=["授業が役立ったか（５段階評価）"])
     useful_counts = useful_df["授業が役立ったか（５段階評価）"].value_counts().reset_index()
     useful_counts.columns = ["評価", "件数"]
     useful_counts["評価"] = useful_counts["評価"].astype(str)
@@ -253,8 +277,8 @@ if "授業が役立ったか（５段階評価）" in df.columns:
 else:
     st.info("「授業が役立ったか（５段階評価）」の列がないため分布を表示できません。")
 
-if "授業が難しかったか（５段階評価）" in df.columns:
-    diff_df = df.dropna(subset=["授業が難しかったか（５段階評価）"])
+if "授業が難しかったか（５段階評価）" in df_filtered.columns:
+    diff_df = df_filtered.dropna(subset=["授業が難しかったか（５段階評価）"])
     diff_counts = diff_df["授業が難しかったか（５段階評価）"].value_counts().reset_index()
     diff_counts.columns = ["評価", "件数"]
     diff_counts["評価"] = diff_counts["評価"].astype(str)
@@ -267,11 +291,11 @@ if "授業が難しかったか（５段階評価）" in df.columns:
 else:
     st.info("「授業が難しかったか（５段階評価）」の列がないため分布を表示できません。")
 
-# テキスト解析：頻出語
+# テキスト解析：頻出語（表示中のデータに基づく）
 st.write("")
-st.subheader("アンケート自由記述の頻出語（簡易）")
-if "アンケート回答" in df.columns:
-    top_words = extract_top_words(df["アンケート回答"].astype(str), top_n=20)
+st.subheader("アンケート自由記述の頻出語（簡易・表示中データ）")
+if "アンケート回答" in df_filtered.columns:
+    top_words = extract_top_words(df_filtered["アンケート回答"].astype(str), top_n=20)
     if top_words:
         top_df = pd.DataFrame(top_words, columns=["語", "出現回数"])
         st.table(top_df.head(20))
@@ -280,12 +304,12 @@ if "アンケート回答" in df.columns:
 else:
     st.info("「アンケート回答」の列がないため自由記述解析ができません。")
 
-# 時系列解析：日別の回答数
-if "回答日時" in df.columns and pd.api.types.is_datetime64_any_dtype(df["回答日時"]):
+# 時系列解析：日別の回答数（表示中のデータ）
+if "回答日時" in df_filtered.columns and pd.api.types.is_datetime64_any_dtype(df_filtered["回答日時"]):
     st.write("")
-    st.subheader("日別の回答数")
-    df["回答日"] = df["回答日時"].dt.date
-    daily = df.groupby("回答日").size().reset_index(name="件数")
+    st.subheader("日別の回答数（表示中データ）")
+    df_filtered["回答日"] = df_filtered["回答日時"].dt.date
+    daily = df_filtered.groupby("回答日").size().reset_index(name="件数")
     line = alt.Chart(daily).mark_line(point=True).encode(
         x=alt.X("回答日:T", title="回答日"),
         y=alt.Y("件数:Q", title="件数")
