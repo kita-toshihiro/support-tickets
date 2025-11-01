@@ -7,13 +7,12 @@ import pandas as pd
 import streamlit as st
 
 # Show app title and description.
-st.set_page_config(page_title="Support tickets", page_icon="🎫")
-st.title("🎫 Support tickets")
+st.set_page_config(page_title="サポートチケット", page_icon="🎫")
+st.title("🎫 サポートチケット")
 st.write(
     """
-    This app shows how you can build an internal tool in Streamlit. Here, we are 
-    implementing a support ticket workflow. The user can create a ticket, edit 
-    existing tickets, and view some statistics.
+    このアプリは Streamlit で社内ツールを作る方法を示します。ここではサポートチケットのワークフローを実装しています。
+    ユーザーはチケットを作成し、既存のチケットを編集し、統計情報を確認できます。
     """
 )
 
@@ -25,26 +24,26 @@ if "df" not in st.session_state:
 
     # Make up some fake issue descriptions.
     issue_descriptions = [
-        "Network connectivity issues in the office",
-        "Software application crashing on startup",
-        "Printer not responding to print commands",
-        "Email server downtime",
-        "Data backup failure",
-        "Login authentication problems",
-        "Website performance degradation",
-        "Security vulnerability identified",
-        "Hardware malfunction in the server room",
-        "Employee unable to access shared files",
-        "Database connection failure",
-        "Mobile application not syncing data",
-        "VoIP phone system issues",
-        "VPN connection problems for remote employees",
-        "System updates causing compatibility issues",
-        "File server running out of storage space",
-        "Intrusion detection system alerts",
-        "Inventory management system errors",
-        "Customer data not loading in CRM",
-        "Collaboration tool not sending notifications",
+        "社内のネットワーク接続の問題",
+        "ソフトウェアが起動時にクラッシュする",
+        "プリンターが印刷コマンドに応答しない",
+        "メールサーバーのダウン",
+        "データバックアップの失敗",
+        "ログイン認証の問題",
+        "ウェブサイトのパフォーマンス低下",
+        "セキュリティ脆弱性の検出",
+        "サーバールームのハードウェア故障",
+        "共有ファイルにアクセスできない従業員",
+        "データベース接続の失敗",
+        "モバイルアプリがデータを同期しない",
+        "VoIP電話システムの問題",
+        "リモート社員の VPN 接続問題",
+        "システムアップデートによる互換性の問題",
+        "ファイルサーバーのストレージ不足",
+        "侵入検知システムのアラート",
+        "在庫管理システムのエラー",
+        "CRM に顧客データが読み込まれない",
+        "コラボレーションツールが通知を送信しない",
     ]
 
     # Generate the dataframe with 100 rows/tickets.
@@ -66,14 +65,14 @@ if "df" not in st.session_state:
 
 
 # Show a section to add a new ticket.
-st.header("Add a ticket")
+st.header("チケットを追加")
 
 # We're adding tickets via an `st.form` and some input widgets. If widgets are used
 # in a form, the app will only rerun once the submit button is pressed.
 with st.form("add_ticket_form"):
-    issue = st.text_area("Describe the issue")
-    priority = st.selectbox("Priority", ["High", "Medium", "Low"])
-    submitted = st.form_submit_button("Submit")
+    issue = st.text_area("問題の説明")
+    priority = st.selectbox("優先度", ["High", "Medium", "Low"])
+    submitted = st.form_submit_button("送信")
 
 if submitted:
     # Make a dataframe for the new ticket and append it to the dataframe in session
@@ -93,17 +92,16 @@ if submitted:
     )
 
     # Show a little success message.
-    st.write("Ticket submitted! Here are the ticket details:")
+    st.write("チケットを送信しました！ チケットの詳細：")
     st.dataframe(df_new, use_container_width=True, hide_index=True)
     st.session_state.df = pd.concat([df_new, st.session_state.df], axis=0)
 
 # Show section to view and edit existing tickets in a table.
-st.header("Existing tickets")
-st.write(f"Number of tickets: `{len(st.session_state.df)}`")
+st.header("既存のチケット")
+st.write(f"チケット数: `{len(st.session_state.df)}`")
 
 st.info(
-    "You can edit the tickets by double clicking on a cell. Note how the plots below "
-    "update automatically! You can also sort the table by clicking on the column headers.",
+    "セルをダブルクリックするとチケットを編集できます。下のグラフは自動で更新されます。列ヘッダーをクリックして並べ替えることもできます。",
     icon="✍️",
 )
 
@@ -115,14 +113,14 @@ edited_df = st.data_editor(
     hide_index=True,
     column_config={
         "Status": st.column_config.SelectboxColumn(
-            "Status",
-            help="Ticket status",
+            "ステータス",
+            help="チケットのステータス",
             options=["Open", "In Progress", "Closed"],
             required=True,
         ),
         "Priority": st.column_config.SelectboxColumn(
-            "Priority",
-            help="Priority",
+            "優先度",
+            help="チケットの優先度",
             options=["High", "Medium", "Low"],
             required=True,
         ),
@@ -132,18 +130,18 @@ edited_df = st.data_editor(
 )
 
 # Show some metrics and charts about the ticket.
-st.header("Statistics")
+st.header("統計")
 
 # Show metrics side by side using `st.columns` and `st.metric`.
 col1, col2, col3 = st.columns(3)
 num_open_tickets = len(st.session_state.df[st.session_state.df.Status == "Open"])
-col1.metric(label="Number of open tickets", value=num_open_tickets, delta=10)
-col2.metric(label="First response time (hours)", value=5.2, delta=-1.5)
-col3.metric(label="Average resolution time (hours)", value=16, delta=2)
+col1.metric(label="オープン中のチケット数", value=num_open_tickets, delta=10)
+col2.metric(label="初回対応時間（時間）", value=5.2, delta=-1.5)
+col3.metric(label="平均解決時間（時間）", value=16, delta=2)
 
 # Show two Altair charts using `st.altair_chart`.
 st.write("")
-st.write("##### Ticket status per month")
+st.write("##### 月ごとのチケットステータス")
 status_plot = (
     alt.Chart(edited_df)
     .mark_bar()
@@ -159,7 +157,7 @@ status_plot = (
 )
 st.altair_chart(status_plot, use_container_width=True, theme="streamlit")
 
-st.write("##### Current ticket priorities")
+st.write("##### 現在のチケット優先度")
 priority_plot = (
     alt.Chart(edited_df)
     .mark_arc()
