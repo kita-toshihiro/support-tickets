@@ -8,17 +8,20 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="授業アンケート解析", page_icon="📊")
-st.title("📊 授業アンケート解析ツール")
+st.set_page_config(page_title="授業アンケート解析（対話式）", page_icon="📊")
+st.title("📊 授業アンケート解析ツール（チャット式）")
 st.write(
     """
-    CSVファイルをアップロードしてアンケート結果を解析します。
+    CSVをアップロードして解析できます。さらに「チャット形式」で
+    データの内容について質問できます（例: カラム一覧、特定キーワードの検索、統計要約など）。
     期待されるCSVのカラム（ヘッダ）は次のとおりです:
     番号,学生番号,アンケート回答,授業が役立ったか（５段階評価）,授業が難しかったか（５段階評価）,回答日時
     """
 )
 
-# ファイルアップロード
+# -------------------------
+# ファイル読み込み・正規化
+# -------------------------
 uploaded_file = st.file_uploader(
     "CSVファイルをアップロードしてください（UTF-8、カンマ区切り）",
     type=["csv"],
@@ -40,12 +43,10 @@ sample_csv = """番号,学生番号,アンケート回答,授業が役立った�
 """
 
 def load_csv(file) -> pd.DataFrame:
-    # ファイルオブジェクト or str
     if isinstance(file, str):
         buf = io.StringIO(file)
         df = pd.read_csv(buf)
     else:
-        # streamlit の UploadedFile はバイナリなので decode
         try:
             df = pd.read_csv(file)
         except Exception:
@@ -54,12 +55,11 @@ def load_csv(file) -> pd.DataFrame:
     return df
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # 期待するカラム名の簡易マッチングとリネーム
     col_map = {}
     cols = list(df.columns)
     for c in cols:
-        c_norm = re.sub(r"\s+", "", c).lower()
-        if "番号" in c or c_norm == "id" or c_norm == "number":
+        c_norm = re.sub(r"\s+", "", str(c)).lower()
+        if "番号" in c or c_norm in ("id", "number"):
             col_map[c] = "番号"
         elif "学生" in c or "student" in c_norm:
             col_map[c] = "学生番号"
@@ -74,10 +74,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=col_map)
 
 def make_columns_unique(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    列名の重複を避けるために、一意化する。
-    重複があれば '列名(1)', '列名(2)' ... のように変更する。
-    """
     cols = list(df.columns)
     seen = {}
     new_cols = []
@@ -88,7 +84,6 @@ def make_columns_unique(df: pd.DataFrame) -> pd.DataFrame:
         else:
             seen[c] += 1
             new_name = f"{c}({seen[c]-1})"
-            # もし new_name が既に存在していたら更にインクリメント
             while new_name in seen:
                 seen[c] += 1
                 new_name = f"{c}({seen[c]-1})"
@@ -97,20 +92,11 @@ def make_columns_unique(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = new_cols
     return df
 
-def safe_to_numeric(s):
-    try:
-        return pd.to_numeric(s)
-    except Exception:
-        return pd.Series(dtype="float64")
-
 def extract_top_words(series: pd.Series, top_n=10):
-    # 簡易トークン化：日本語の単語分割はしていないので、ひらがな・カタカナ・漢字の連続を抽出
     texts = series.dropna().astype(str).tolist()
     tokens = []
     for t in texts:
-        # 英数字は分ける、記号除去
         t_clean = re.sub(r"[^\w\u3000-\u303F\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF]", " ", t)
-        # 短すぎる単語を排除
         for w in t_clean.split():
             if len(w) >= 2:
                 tokens.append(w)
@@ -118,23 +104,13 @@ def extract_top_words(series: pd.Series, top_n=10):
     return counter.most_common(top_n)
 
 def make_safe_preview(df: pd.DataFrame, n=50) -> pd.DataFrame:
-    """
-    st.dataframe に渡す前に安全化する。
-    - datetime.date -> pd.to_datetime
-    - list/dict/tuple/set を含む列は文字列化
-    - object 列で pyarrow に渡せない可能性があるものは文字列化
-    """
     df_preview = df.head(n).copy()
-
-    # datetime.date を pandas datetime に変換（列全体が date 型なら変換）
     for col in df_preview.columns:
-        if df_preview[col].dropna().apply(lambda x: isinstance(x, datetime.date) and not isinstance(x, datetime.datetime)).any():
-            try:
-                df_preview[col] = pd.to_datetime(df_preview[col])
-            except Exception:
-                df_preview[col] = df_preview[col].astype(str)
-
-    # 非スカラー要素を文字列化
+        try:
+            if df_preview[col].dropna().apply(lambda x: isinstance(x, datetime.date) and not isinstance(x, datetime.datetime)).any():
+                df_preview[col] = pd.to_datetime(df_preview[col], errors="coerce")
+        except Exception:
+            pass
     for col in df_preview.columns:
         try:
             has_bad = df_preview[col].dropna().apply(lambda x: isinstance(x, (list, dict, set, tuple))).any()
@@ -142,17 +118,14 @@ def make_safe_preview(df: pd.DataFrame, n=50) -> pd.DataFrame:
             has_bad = False
         if has_bad:
             df_preview[col] = df_preview[col].astype(str)
-
-    # object 列は文字列化しておく（安全策）
     for col in df_preview.select_dtypes(include=["object"]).columns:
         try:
             df_preview[col] = df_preview[col].astype(str)
         except Exception:
             df_preview[col] = df_preview[col].apply(lambda x: str(x) if pd.notna(x) else x)
-
     return df_preview
 
-# データフレーム読み込み（アップロード or サンプル）
+# 読み込み
 if uploaded_file is not None:
     try:
         df = load_csv(uploaded_file)
@@ -164,13 +137,11 @@ else:
     st.info("CSVをアップロードして解析できます。サンプルデータでプレビューします。")
     df = load_csv(sample_csv)
 
-# 正規化（カラム名を期待する日本語名に）
+# 正規化と一意化
 df = normalize_columns(df)
-
-# 重複列名を検出して一意化する（これが今回の重要な修正）
 df = make_columns_unique(df)
 
-# 必要なカラムがなければ警告
+# 欠けている想定カラムがある場合は注意
 required_cols = [
     "番号",
     "学生番号",
@@ -183,89 +154,194 @@ missing = [c for c in required_cols if c not in df.columns]
 if missing:
     st.warning(f"以下の想定カラムが見つかりません: {missing}。可能な限り存在するカラムで解析します。")
 
-# 表示用に先頭を出す
-st.header("データプレビュー")
-
-# --- キーワード検索 UI（追加） ---
-st.subheader("フィルタ: キーワードで行を絞り込み")
-# 検索対象列の選択肢（文字列列を優先）
-string_cols = list(df.select_dtypes(include=["object", "string"]).columns)
-# 候補が空なら全列を対象にする
-cols_for_search = string_cols if string_cols else list(df.columns)
-search_column = st.selectbox("検索対象列を選択（部分一致、大文字小文字を区別しません）", options=cols_for_search, index=0 if cols_for_search else None)
-keyword = st.text_input("検索キーワード（空欄でフィルタ解除）", value="")
-
-# --- 安全化してから表示する ---
-df_preview = make_safe_preview(df, n=50)
-
-# キーワードが指定されたらフィルタを適用
-if keyword and search_column:
-    # 部分一致（case-insensitive）。NaN は False 扱い。
-    try:
-        mask = df[search_column].astype(str).str.contains(keyword, case=False, na=False)
-        df_filtered = df[mask].copy()
-        st.info(f"キーワード「{keyword}」に一致する行: {len(df_filtered)} 件（検索列: {search_column}）")
-        df_preview = make_safe_preview(df_filtered, n=50)
-    except Exception as e:
-        st.warning(f"フィルタ適用中にエラーが発生しました: {e}")
-        df_filtered = df.copy()
-else:
-    df_filtered = df.copy()
-
-# 表示（安全化済み）
-try:
-    st.dataframe(df_preview, use_container_width=True)
-except Exception as e:
-    st.warning(f"テーブル表示でエラーが発生しました（安全化した上でも表示に失敗しました）。詳細: {e}")
-    # ここでは index をクリアし、列名衝突が残らないように列名を str で再設定して表示
-    fallback = df_preview.copy()
-    fallback.columns = [str(c) for c in fallback.columns]
-    try:
-        st.write(fallback.astype(str))
-    except Exception as e2:
-        st.error(f"安全表示にも失敗しました: {e2}")
-        st.write("列名一覧（参考）:", list(df.columns))
-
-# 型変換
+# DataFrame の型整備
 if "回答日時" in df.columns:
     try:
-        df["回答日時"] = pd.to_datetime(df["回答日時"])
+        df["回答日時"] = pd.to_datetime(df["回答日時"], errors="coerce")
     except Exception:
-        # 変換失敗は無視
         pass
-
-# 数値カラムを安全に変換
 if "授業が役立ったか（５段階評価）" in df.columns:
     df["授業が役立ったか（５段階評価）"] = pd.to_numeric(df["授業が役立ったか（５段階評価）"], errors="coerce")
 if "授業が難しかったか（５段階評価）" in df.columns:
     df["授業が難しかったか（５段階評価）"] = pd.to_numeric(df["授業が難しかったか（５段階評価）"], errors="coerce")
 
-# 基本統計（フィルタ前の全体に対する集計）
-st.header("集計・基本統計")
+# -------------------------
+# チャットUI: 一連の対話で質問できる仕組み
+# -------------------------
+st.sidebar.header("チャット式インターフェース")
+st.sidebar.write("ここに質問を入力すると、データフレームに基づいて応答します。")
+
+# 会話履歴をセッションステートで保持
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []  # list of (user, bot)
+
+# ユーザー入力
+user_input = st.sidebar.text_input("質問を入力（例: カラム一覧、サンプル行、'演習' を含む行など）", value="")
+
+# 追加のボタンでよくある質問を挿入できる
+if st.sidebar.button("カラム一覧を表示"):
+    user_input = "カラム一覧"
+if st.sidebar.button("サンプル行を表示"):
+    user_input = "サンプル行"
+if st.sidebar.button("役立ったかの平均"):
+    user_input = "授業が役立ったか（平均）を教えて"
+if st.sidebar.button("キーワード検索（アンケート回答）"):
+    user_input = "アンケート回答に '演習' を含む行を表示"
+
+# 検索対象列を選ぶ UI（チャット以外でも単独で利用可能）
+st.sidebar.markdown("---")
+st.sidebar.subheader("列選択（キーワード検索に使用）")
+string_cols = list(df.select_dtypes(include=["object", "string"]).columns)
+cols_for_search = string_cols if string_cols else list(df.columns)
+search_column = st.sidebar.selectbox("検索対象列", options=cols_for_search, index=0 if cols_for_search else None)
+st.sidebar.caption("チャットでキーワード検索をしたい場合、ここで列を選んでから質問してください。")
+
+# 処理関数: ユーザーの自由なテキストに対して簡易ルールで応答を生成
+def answer_query(query: str, df: pd.DataFrame) -> str:
+    q = query.strip().lower()
+    if q == "":
+        return "質問が入力されていません。何か質問してください（例: カラム一覧、サンプル行、アンケートに含まれる特定語の検索など）。"
+
+    # カラム一覧
+    if "カラム" in q or "列" in q or "columns" in q:
+        return "カラム一覧: " + ", ".join([str(c) for c in df.columns.tolist()])
+
+    # サンプル行
+    if "サンプル" in q or "先頭" in q or "head" in q:
+        n = 5
+        m = re.search(r"(\d+)", q)
+        if m:
+            n = int(m.group(1))
+        preview = df.head(n)
+        return f"先頭 {n} 行のプレビュー:\n\n{preview.to_string(index=False)}"
+
+    # 特定カラムの平均値（単純マッチ）
+    if "平均" in q and ("役立" in q or "役に" in q or "useful" in q):
+        col = "授業が役立ったか（５段階評価）"
+        if col in df.columns:
+            avg = df[col].mean(skipna=True)
+            return f"'{col}' の平均: {avg:.2f}" if not np.isnan(avg) else f"'{col}' に数値データがありません。"
+        else:
+            return f"列 '{col}' が見つかりません。カラム一覧を確認してください。"
+
+    if "平均" in q and ("難し" in q or "難しい" in q or "difficult" in q):
+        col = "授業が難しかったか（５段階評価）"
+        if col in df.columns:
+            avg = df[col].mean(skipna=True)
+            return f"'{col}' の平均: {avg:.2f}" if not np.isnan(avg) else f"'{col}' に数値データがありません。"
+        else:
+            return f"列 '{col}' が見つかりません。カラム一覧を確認してください。"
+
+    # キーワード検索の自然文パターン（例: 'アンケート回答に 演習 を含む行'）
+    m = re.search(r"(含む|含める|含まれる).{0,10}['\"“”]?([^'\"、\s]+)['\"”]?", query)
+    if m:
+        keyword = m.group(2)
+        col = search_column if search_column else "アンケート回答"
+        if col not in df.columns:
+            return f"検索対象の列 '{col}' が見つかりません。代替の列を選ぶか、カラム一覧を確認してください。"
+        mask = df[col].astype(str).str.contains(keyword, case=False, na=False)
+        matched = df[mask]
+        if len(matched) == 0:
+            return f"キーワード「{keyword}」に一致する行は見つかりませんでした（列: {col}）。"
+        else:
+            # 表示は最大20行まで
+            return f"キーワード「{keyword}」に一致する {len(matched)} 件の行（最大20件表示）:\n\n{matched.head(20).to_string(index=False)}"
+
+    # 単純なキーワードが入っている場合（"演習" など）
+    m2 = re.search(r"['\"“”]?([^'\"、\s]{2,})['\"”]?$", query)
+    if m2 and len(query.split()) == 1:
+        keyword = m2.group(1)
+        col = search_column if search_column else "アンケート回答"
+        if col in df.columns:
+            mask = df[col].astype(str).str.contains(keyword, case=False, na=False)
+            matched = df[mask]
+            return f"キーワード「{keyword}」に一致する行: {len(matched)} 件（列: {col}）。先頭5件:\n\n{matched.head(5).to_string(index=False)}" if len(matched) > 0 else f"キーワード「{keyword}」に一致する行は見つかりませんでした。"
+    # 評価分布や基本統計の要求
+    if "分布" in q or "ヒストグラム" in q:
+        parts = []
+        if "授業が役立ったか（５段階評価）" in df.columns:
+            vc = df["授業が役立ったか（５段階評価）"].value_counts().sort_index()
+            parts.append("役立ったか（評価）:\n" + vc.to_string())
+        if "授業が難しかったか（５段階評価）" in df.columns:
+            vc2 = df["授業が難しかったか（５段階評価）"].value_counts().sort_index()
+            parts.append("難しかったか（評価）:\n" + vc2.to_string())
+        return "\n\n".join(parts) if parts else "該当する評価列が見つかりません。"
+
+    # それ以外は自由テキスト検索（任意の列を横断）
+    # query に含まれる語を dataframe 全体で探す（最大100行表示）
+    tokens = re.findall(r"\w+|[^\s]", query)
+    keyword = query.strip()
+    if len(keyword) >= 1:
+        # 全テキスト列を使って検索
+        text_cols = list(df.select_dtypes(include=["object", "string"]).columns)
+        if not text_cols:
+            return "テキスト列が見つかりません。具体的にどの列を検索したいか指定してください。"
+        mask = pd.Series(False, index=df.index)
+        for c in text_cols:
+            mask = mask | df[c].astype(str).str.contains(keyword, case=False, na=False)
+        matched = df[mask]
+        if len(matched) == 0:
+            return f"「{keyword}」に一致する行は見つかりませんでした（テキスト列を横断検索）。"
+        return f"テキスト列横断検索で {len(matched)} 件ヒット（最大100行表示）:\n\n{matched.head(100).to_string(index=False)}"
+
+    return "すみません、その質問には対応していません。'カラム一覧' や 'サンプル行'、'アンケート回答に 演習 を含む行' などの例を試してください。"
+
+# ユーザーが入力したら処理して履歴に追加
+if user_input:
+    user_question = user_input.strip()
+    st.session_state.chat_history.append(("user", user_question))
+    response = answer_query(user_question, df)
+    st.session_state.chat_history.append(("bot", response))
+
+# チャット履歴表示
+st.subheader("チャット: データについて質問")
+for role, text in st.session_state.chat_history[::-1]:
+    if role == "user":
+        st.markdown(f"**あなた:** {text}")
+    else:
+        st.markdown(f"**ツール:**\n```\n{text}\n```")
+
+# -------------------------
+# 既存の解析機能（表示中データに基づくグラフ等）
+# -------------------------
+st.header("解析パネル（表示中データに基づく）")
+
+# 現在のフィルタ（チャットで検索して matched を生成しているなら df_filtered を使う）
+# チャットルールにマッチして last response に matched DataFrame を返す場合、現在は text 出力のみなので
+# ここではフィルタ無しの全体表示を行う。必要ならチャット側で df_filtered をセッションに入れる拡張が可能。
+df_filtered = df.copy()
+
 col1, col2, col3 = st.columns(3)
-
-total_responses = len(df)
+total_responses = len(df_filtered)
 col1.metric("回答数（全体）", total_responses)
-
-if "授業が役立ったか（５段階評価）" in df.columns:
-    avg_useful = df["授業が役立ったか（５段階評価）"].mean(skipna=True)
-    col2.metric("授業が役立ったか（平均・全体）", f"{avg_useful:.2f}" if not np.isnan(avg_useful) else "N/A")
-else:
-    col2.metric("授業が役立ったか（平均・全体）", "N/A")
-
-if "授業が難しかったか（５段階評価）" in df.columns:
-    avg_difficulty = df["授業が難しかったか（５段階評価）"].mean(skipna=True)
-    col3.metric("授業が難しかったか（平均・全体）", f"{avg_difficulty:.2f}" if not np.isnan(avg_difficulty) else "N/A")
-else:
-    col3.metric("授業が難しかったか（平均・全体）", "N/A")
-
-# 評価分布のチャート（フィルタ後のデータを使って表示）
-st.write("")
-st.subheader("評価の分布（表示中のデータに基づく）")
-
 if "授業が役立ったか（５段階評価）" in df_filtered.columns:
-    useful_df = df_filtered.dropna(subset=["授業が役立ったか（５段階評価）"])
-    useful_counts = useful_df["授業が役立ったか（５段階評価）"].value_counts().reset_index()
+    avg_useful = df_filtered["授業が役立ったか（５段階評価）"].mean(skipna=True)
+    col2.metric("授業が役立ったか（平均）", f"{avg_useful:.2f}" if not np.isnan(avg_useful) else "N/A")
+else:
+    col2.metric("授業が役立ったか（平均）", "N/A")
+if "授業が難しかったか（５段階評価）" in df_filtered.columns:
+    avg_diff = df_filtered["授業が難しかったか（５段階評価）"].mean(skipna=True)
+    col3.metric("授業が難しかったか（平均）", f"{avg_diff:.2f}" if not np.isnan(avg_diff) else "N/A")
+else:
+    col3.metric("授業が難しかったか（平均）", "N/A")
+
+st.subheader("データプレビュー（安全化して最大50行）")
+df_preview = make_safe_preview(df_filtered, n=50)
+try:
+    st.dataframe(df_preview, use_container_width=True)
+except Exception as e:
+    st.warning(f"テーブル表示でエラーが発生しました: {e}")
+    fallback = df_preview.copy()
+    fallback.columns = [str(c) for c in fallback.columns]
+    try:
+        st.write(fallback.astype(str))
+    except Exception as e2:
+        st.error(f"表示に失敗しました: {e2}")
+        st.write("列名一覧:", list(df.columns))
+
+st.subheader("評価の分布（表示中データ）")
+if "授業が役立ったか（５段階評価）" in df_filtered.columns:
+    useful_counts = df_filtered["授業が役立ったか（５段階評価）"].value_counts().reset_index()
     useful_counts.columns = ["評価", "件数"]
     useful_counts["評価"] = useful_counts["評価"].astype(str)
     chart1 = alt.Chart(useful_counts).mark_bar().encode(
@@ -274,12 +350,8 @@ if "授業が役立ったか（５段階評価）" in df_filtered.columns:
         color=alt.Color("評価:N")
     )
     st.altair_chart(chart1, use_container_width=True)
-else:
-    st.info("「授業が役立ったか（５段階評価）」の列がないため分布を表示できません。")
-
 if "授業が難しかったか（５段階評価）" in df_filtered.columns:
-    diff_df = df_filtered.dropna(subset=["授業が難しかったか（５段階評価）"])
-    diff_counts = diff_df["授業が難しかったか（５段階評価）"].value_counts().reset_index()
+    diff_counts = df_filtered["授業が難しかったか（５段階評価）"].value_counts().reset_index()
     diff_counts.columns = ["評価", "件数"]
     diff_counts["評価"] = diff_counts["評価"].astype(str)
     chart2 = alt.Chart(diff_counts).mark_bar().encode(
@@ -288,35 +360,5 @@ if "授業が難しかったか（５段階評価）" in df_filtered.columns:
         color=alt.Color("評価:N")
     )
     st.altair_chart(chart2, use_container_width=True)
-else:
-    st.info("「授業が難しかったか（５段階評価）」の列がないため分布を表示できません。")
 
-# テキスト解析：頻出語（表示中のデータに基づく）
-st.write("")
-st.subheader("アンケート自由記述の頻出語（簡易・表示中データ）")
-if "アンケート回答" in df_filtered.columns:
-    top_words = extract_top_words(df_filtered["アンケート回答"].astype(str), top_n=20)
-    if top_words:
-        top_df = pd.DataFrame(top_words, columns=["語", "出現回数"])
-        st.table(top_df.head(20))
-    else:
-        st.write("十分なテキストがないため頻出語を抽出できませんでした。")
-else:
-    st.info("「アンケート回答」の列がないため自由記述解析ができません。")
-
-# 時系列解析：日別の回答数（表示中のデータ）
-if "回答日時" in df_filtered.columns and pd.api.types.is_datetime64_any_dtype(df_filtered["回答日時"]):
-    st.write("")
-    st.subheader("日別の回答数（表示中データ）")
-    df_filtered["回答日"] = df_filtered["回答日時"].dt.date
-    daily = df_filtered.groupby("回答日").size().reset_index(name="件数")
-    line = alt.Chart(daily).mark_line(point=True).encode(
-        x=alt.X("回答日:T", title="回答日"),
-        y=alt.Y("件数:Q", title="件数")
-    )
-    st.altair_chart(line, use_container_width=True)
-else:
-    st.info("回答日時の列がない、または日時型に変換できないため日別解析を表示できません。")
-
-st.write("")
-st.caption("注: このツールは簡易解析を行います。より高度な自然言語処理や日本語形態素解析を行う場合は MeCab 等を導入してください。")
+st.caption("注: チャットはルールベースの簡易応答です。より自然な対話や要約を望む場合は外部の NLP モデル（API）を組み合わせてください。")
