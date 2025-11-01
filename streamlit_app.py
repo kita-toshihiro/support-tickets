@@ -93,6 +93,45 @@ def extract_top_words(series: pd.Series, top_n=10):
     counter = Counter(tokens)
     return counter.most_common(top_n)
 
+def make_safe_preview(df: pd.DataFrame, n=50) -> pd.DataFrame:
+    """
+    st.dataframe に渡す前に安全化する。
+    - datetime.date -> pd.to_datetime
+    - list/dict/tuple/set を含む列は文字列化
+    - object 列で pyarrow に渡せない可能性があるものは文字列化
+    """
+    df_preview = df.head(n).copy()
+
+    # datetime.date を pandas datetime に変換（列全体が date 型なら変換）
+    for col in df_preview.columns:
+        # convert python datetime.date in cells to pandas datetime if possible
+        if df_preview[col].dropna().apply(lambda x: isinstance(x, datetime.date) and not isinstance(x, datetime.datetime)).any():
+            try:
+                df_preview[col] = pd.to_datetime(df_preview[col])
+            except Exception:
+                # 変換できなければ文字列化
+                df_preview[col] = df_preview[col].astype(str)
+
+    # 非スカラー要素を文字列化
+    for col in df_preview.columns:
+        # pandas.Series.map で isinstance を個別にチェック（NaN は無視）
+        try:
+            has_bad = df_preview[col].dropna().apply(lambda x: isinstance(x, (list, dict, set, tuple))).any()
+        except Exception:
+            has_bad = False
+        if has_bad:
+            df_preview[col] = df_preview[col].astype(str)
+
+    # それでも object 型で pyarrow が嫌う可能性が高い場合は文字列化しておく（安全策）
+    for col in df_preview.select_dtypes(include=["object"]).columns:
+        # 文字列長が非常に長い場合や混在型かを判断して文字列化（ここでは安全のため文字列化して問題なし）
+        try:
+            df_preview[col] = df_preview[col].astype(str)
+        except Exception:
+            df_preview[col] = df_preview[col].apply(lambda x: str(x) if pd.notna(x) else x)
+
+    return df_preview
+
 # データフレーム読み込み（アップロード or サンプル）
 if uploaded_file is not None:
     try:
@@ -123,7 +162,15 @@ if missing:
 
 # 表示用に先頭を出す
 st.header("データプレビュー")
-st.dataframe(df.head(50), use_container_width=True)
+
+# --- 安全化してから表示する ---
+df_preview = make_safe_preview(df, n=50)
+try:
+    st.dataframe(df_preview, use_container_width=True)
+except Exception as e:
+    # pyarrow 変換などでエラーが返る場合に備え、文字列化したものを表示して落ちないようにする
+    st.warning(f"テーブル表示でエラーが発生しました（安全化した上でも表示に失敗しました）。詳細: {e}")
+    st.write(df_preview.astype(str))
 
 # 型変換
 if "回答日時" in df.columns:
